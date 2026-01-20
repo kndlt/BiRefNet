@@ -17,6 +17,7 @@ from huggingface_hub import hf_hub_download
 import numpy as np
 import cv2
 from scipy.spatial import cKDTree
+import time
 
 # Simple fix for BiRefNet compatibility
 import transformers.configuration_utils
@@ -36,8 +37,6 @@ def apply_tightening(image, seam_width=1, threshold=200):
     """
     Apply seam removal to background-matted image.
     """
-    print(f"Applying tightening (threshold={threshold}, width={seam_width})...")
-    
     # Split into RGB and alpha
     rgb = image.convert('RGB')
     alpha = image.getchannel('A')
@@ -106,7 +105,6 @@ def apply_tightening(image, seam_width=1, threshold=200):
     final_result = Image.fromarray(result.astype(np.uint8))
     final_result.putalpha(Image.fromarray((alpha_result * 255).astype(np.uint8)))
     
-    print("✓ Tightening applied")
     return final_result
 
 
@@ -169,7 +167,6 @@ def remove_background(image_path: str, model, device='cpu', batch_size=4):
         print(f"Using batch size: {batch_size}")
         
         frames_rgba = []
-        frames_tight = []
         durations = []
         
         # Load all frames first
@@ -180,12 +177,19 @@ def remove_background(image_path: str, model, device='cpu', batch_size=4):
             durations.append(img.info.get('duration', 100))
             all_frames.append(frame)
         
-        # Process in batches
+        # Phase 1: Inference - Process all frames in batches
+        print(f"\nPhase 1: Running inference on {len(all_frames)} frames...")
+        inference_start = time.time()
+        
+        # Reset GPU memory stats if using CUDA
+        if device == 'cuda':
+            torch.cuda.reset_peak_memory_stats()
+        
         for batch_start in range(0, len(all_frames), batch_size):
             batch_end = min(batch_start + batch_size, len(all_frames))
             batch_frames = all_frames[batch_start:batch_end]
             
-            print(f"Processing frames {batch_start + 1}-{batch_end}/{len(all_frames)}...")
+            print(f"  Inferencing frames {batch_start + 1}-{batch_end}/{len(all_frames)}...")
             
             # Prepare batch
             batch_tensors = torch.stack([transform(frame) for frame in batch_frames]).to(device)
@@ -194,7 +198,7 @@ def remove_background(image_path: str, model, device='cpu', batch_size=4):
             with torch.no_grad():
                 preds = model(batch_tensors)[-1].sigmoid().cpu()
             
-            # Process each result in the batch
+            # Convert masks and apply to frames
             for i, (frame, pred) in enumerate(zip(batch_frames, preds)):
                 # Convert mask to PIL and resize to original size
                 mask = transforms.ToPILImage()(pred.squeeze())
@@ -203,24 +207,57 @@ def remove_background(image_path: str, model, device='cpu', batch_size=4):
                 # Apply mask to create transparent background
                 result_rgba = frame.copy()
                 result_rgba.putalpha(mask)
-                
-                # Apply tightening
-                result_tight = apply_tightening(result_rgba, seam_width=1, threshold=200)
-                
                 frames_rgba.append(result_rgba)
-                frames_tight.append(result_tight)
+        
+        inference_time = time.time() - inference_start
+        
+        # Get peak GPU memory usage
+        if device == 'cuda':
+            peak_memory = torch.cuda.max_memory_allocated() / (1024 ** 3)  # GB
+            print(f"✓ Inference completed in {inference_time:.2f}s ({inference_time/len(all_frames):.3f}s per frame)")
+            print(f"✓ Peak GPU memory: {peak_memory:.2f}GB")
+        else:
+            print(f"✓ Inference completed in {inference_time:.2f}s ({inference_time/len(all_frames):.3f}s per frame)")
+        
+        # Phase 2: Tightening - Apply to all frames
+        print(f"\nPhase 2: Applying tightening to {len(frames_rgba)} frames...")
+        tightening_start = time.time()
+        frames_tight = []
+        for idx, rgba_frame in enumerate(frames_rgba):
+            if (idx + 1) % 10 == 0 or idx == 0 or idx == len(frames_rgba) - 1:
+                print(f"  Tightening frame {idx + 1}/{len(frames_rgba)}...")
+            result_tight = apply_tightening(rgba_frame, seam_width=1, threshold=200)
+            frames_tight.append(result_tight)
+        
+        tightening_time = time.time() - tightening_start
+        total_time = inference_time + tightening_time
+        print(f"✓ Tightening completed in {tightening_time:.2f}s ({tightening_time/len(frames_rgba):.3f}s per frame)")
+        print(f"✓ Total processing time: {total_time:.2f}s")
         
         return frames_rgba, frames_tight, durations
     
     else:
         # Single image processing
+        start_time = time.time()
+        
         image = img.convert('RGB')
         input_tensor = transform(image).unsqueeze(0).to(device)
         
         # Generate mask
         print("Generating mask...")
+        inference_start = time.time()
+        
+        # Reset GPU memory stats if using CUDA
+        if device == 'cuda':
+            torch.cuda.reset_peak_memory_stats()
+        
         with torch.no_grad():
             preds = model(input_tensor)[-1].sigmoid().cpu()
+        inference_time = time.time() - inference_start
+        
+        # Get peak GPU memory usage
+        if device == 'cuda':
+            peak_memory = torch.cuda.max_memory_allocated() / (1024 ** 3)  # GB
         
         # Convert mask to PIL and resize to original size
         mask = transforms.ToPILImage()(preds[0].squeeze())
@@ -231,7 +268,18 @@ def remove_background(image_path: str, model, device='cpu', batch_size=4):
         result_rgba.putalpha(mask)
         
         # Apply tightening to remove seams
+        print("Applying tightening...")
+        tightening_start = time.time()
         result_tight = apply_tightening(result_rgba, seam_width=1, threshold=200)
+        tightening_time = time.time() - tightening_start
+        
+        total_time = time.time() - start_time
+        
+        if device == 'cuda':
+            print(f"✓ Inference: {inference_time:.2f}s, Tightening: {tightening_time:.2f}s, Total: {total_time:.2f}s")
+            print(f"✓ Peak GPU memory: {peak_memory:.2f}GB")
+        else:
+            print(f"✓ Inference: {inference_time:.2f}s, Tightening: {tightening_time:.2f}s, Total: {total_time:.2f}s")
         
         return result_rgba, result_tight, None
 
@@ -283,8 +331,8 @@ Examples:
     parser.add_argument(
         '--batch-size', '-b',
         type=int,
-        default=4,
-        help='Batch size for processing animated images (default: 4)'
+        default=8,
+        help='Batch size for processing animated images (default: 8)'
     )
     
     args = parser.parse_args()
