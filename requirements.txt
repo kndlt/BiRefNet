@@ -1,6 +1,6 @@
-torch==2.5.1
+torch
 torchvision
-numpy<2
+numpy
 opencv-python
 timm
 scipy
@@ -12,6 +12,6 @@ tqdm
 prettytable
 tabulate
 
-huggingface-hub>0.25
+huggingface-hub
 accelerate
 transformers

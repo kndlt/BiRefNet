@@ -49,7 +49,7 @@ def load_birefnet_with_custom_weights(checkpoint_path: str = None):
     
     print(f"Loading custom weights from {checkpoint_path}...")
     # Load and apply custom weights
-    state_dict = torch.load(checkpoint_path, map_location='cpu')
+    state_dict = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     
     # Clean up weight keys if needed (remove module prefixes)
     clean_state_dict = {}
@@ -162,11 +162,23 @@ Examples:
     
     # Load model
     model = load_birefnet_with_custom_weights(args.weights)
-    model.to(device)
-    model.eval()
     
-    # Process image
-    result = remove_background(args.input, model, device)
+    try:
+        model.to(device)
+        model.eval()
+        
+        # Process image
+        result = remove_background(args.input, model, device)
+    except RuntimeError as e:
+        if "CUDA" in str(e) and device == "cuda":
+            print(f"\nWarning: CUDA error encountered: {str(e)[:100]}...")
+            print("Falling back to CPU...\n")
+            device = "cpu"
+            model.to(device)
+            model.eval()
+            result = remove_background(args.input, model, device)
+        else:
+            raise
     
     # Determine output path
     if args.output is None:
