@@ -147,7 +147,7 @@ def load_birefnet_with_custom_weights(checkpoint_path: str = None):
     return model
 
 
-def remove_background(image_path: str, model, device='cpu'):
+def remove_background(image_path: str, model, device='cpu', batch_size=4):
     """Remove background from image using BiRefNet"""
     
     # Image preprocessing
@@ -158,27 +158,82 @@ def remove_background(image_path: str, model, device='cpu'):
     ])
     
     print(f"Processing image: {image_path}")
-    # Load and process image
-    image = Image.open(image_path).convert('RGB')
-    input_tensor = transform(image).unsqueeze(0).to(device)
+    # Load image
+    img = Image.open(image_path)
     
-    # Generate mask
-    print("Generating mask...")
-    with torch.no_grad():
-        preds = model(input_tensor)[-1].sigmoid().cpu()
+    # Check if animated
+    is_animated = hasattr(img, 'n_frames') and img.n_frames > 1
     
-    # Convert mask to PIL and resize to original size
-    mask = transforms.ToPILImage()(preds[0].squeeze())
-    mask = mask.resize(image.size)
+    if is_animated:
+        print(f"Detected animated image with {img.n_frames} frames")
+        print(f"Using batch size: {batch_size}")
+        
+        frames_rgba = []
+        frames_tight = []
+        durations = []
+        
+        # Load all frames first
+        all_frames = []
+        for frame_idx in range(img.n_frames):
+            img.seek(frame_idx)
+            frame = img.convert('RGB')
+            durations.append(img.info.get('duration', 100))
+            all_frames.append(frame)
+        
+        # Process in batches
+        for batch_start in range(0, len(all_frames), batch_size):
+            batch_end = min(batch_start + batch_size, len(all_frames))
+            batch_frames = all_frames[batch_start:batch_end]
+            
+            print(f"Processing frames {batch_start + 1}-{batch_end}/{len(all_frames)}...")
+            
+            # Prepare batch
+            batch_tensors = torch.stack([transform(frame) for frame in batch_frames]).to(device)
+            
+            # Process batch
+            with torch.no_grad():
+                preds = model(batch_tensors)[-1].sigmoid().cpu()
+            
+            # Process each result in the batch
+            for i, (frame, pred) in enumerate(zip(batch_frames, preds)):
+                # Convert mask to PIL and resize to original size
+                mask = transforms.ToPILImage()(pred.squeeze())
+                mask = mask.resize(frame.size)
+                
+                # Apply mask to create transparent background
+                result_rgba = frame.copy()
+                result_rgba.putalpha(mask)
+                
+                # Apply tightening
+                result_tight = apply_tightening(result_rgba, seam_width=1, threshold=200)
+                
+                frames_rgba.append(result_rgba)
+                frames_tight.append(result_tight)
+        
+        return frames_rgba, frames_tight, durations
     
-    # Apply mask to create transparent background
-    result_rgba = image.copy()
-    result_rgba.putalpha(mask)
-    
-    # Apply tightening to remove seams
-    result_tight = apply_tightening(result_rgba, seam_width=1, threshold=200)
-    
-    return result_rgba, result_tight
+    else:
+        # Single image processing
+        image = img.convert('RGB')
+        input_tensor = transform(image).unsqueeze(0).to(device)
+        
+        # Generate mask
+        print("Generating mask...")
+        with torch.no_grad():
+            preds = model(input_tensor)[-1].sigmoid().cpu()
+        
+        # Convert mask to PIL and resize to original size
+        mask = transforms.ToPILImage()(preds[0].squeeze())
+        mask = mask.resize(image.size)
+        
+        # Apply mask to create transparent background
+        result_rgba = image.copy()
+        result_rgba.putalpha(mask)
+        
+        # Apply tightening to remove seams
+        result_tight = apply_tightening(result_rgba, seam_width=1, threshold=200)
+        
+        return result_rgba, result_tight, None
 
 
 def main():
@@ -225,6 +280,13 @@ Examples:
         help='Device to use (default: auto-detect)'
     )
     
+    parser.add_argument(
+        '--batch-size', '-b',
+        type=int,
+        default=4,
+        help='Batch size for processing animated images (default: 4)'
+    )
+    
     args = parser.parse_args()
     
     # Validate inputs
@@ -252,7 +314,7 @@ Examples:
         model.eval()
         
         # Process image
-        result_rgba, result_tight = remove_background(args.input, model, device)
+        result_rgba, result_tight, durations = remove_background(args.input, model, device, args.batch_size)
     except RuntimeError as e:
         if "CUDA" in str(e) and device == "cuda":
             print(f"\nWarning: CUDA error encountered: {str(e)[:100]}...")
@@ -260,7 +322,7 @@ Examples:
             device = "cpu"
             model.to(device)
             model.eval()
-            result_rgba, result_tight = remove_background(args.input, model, device)
+            result_rgba, result_tight, durations = remove_background(args.input, model, device, args.batch_size)
         else:
             raise
     
@@ -268,16 +330,42 @@ Examples:
     base_name = os.path.splitext(args.input)[0]
     ext = os.path.splitext(args.input)[1] or '.png'
     
+    # Use .webp if input was animated
+    if durations is not None:
+        ext = '.webp'
+    
     rgba_path = f"{base_name}.rgba{ext}"
     tight_path = f"{base_name}.rgba.tight{ext}"
     
-    # Save both results
-    result_rgba.save(rgba_path)
-    result_tight.save(tight_path)
-    
-    print(f"✓ Background removed successfully!")
-    print(f"✓ RGBA result saved to: {rgba_path}")
-    print(f"✓ Tightened result saved to: {tight_path}")
+    # Save results
+    if durations is not None:
+        # Save animated WebP
+        result_rgba[0].save(
+            rgba_path,
+            save_all=True,
+            append_images=result_rgba[1:],
+            duration=durations,
+            loop=0,
+            lossless=True
+        )
+        result_tight[0].save(
+            tight_path,
+            save_all=True,
+            append_images=result_tight[1:],
+            duration=durations,
+            loop=0,
+            lossless=True
+        )
+        print(f"✓ Background removed successfully!")
+        print(f"✓ Animated RGBA result saved to: {rgba_path}")
+        print(f"✓ Animated tightened result saved to: {tight_path}")
+    else:
+        # Save single images
+        result_rgba.save(rgba_path)
+        result_tight.save(tight_path)
+        print(f"✓ Background removed successfully!")
+        print(f"✓ RGBA result saved to: {rgba_path}")
+        print(f"✓ Tightened result saved to: {tight_path}")
 
 
 if __name__ == "__main__":
