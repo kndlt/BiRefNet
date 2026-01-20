@@ -12,7 +12,7 @@ As an input, we provide:
 Then the code will change the RGBs of those seam pixels to match the nearby non-seam pixels.
 
 RUN:
-python tightener.py -i sample_nobg.png -w 1 -t 200
+python tightener.py -i sample_nobg.png
 
 
 """
@@ -212,15 +212,15 @@ Examples:
     parser.add_argument(
         '--width', '-w',
         type=int,
-        default=2,
-        help='Seam width in pixels to remove (default: 2)'
+        default=1,
+        help='Seam width in pixels to remove (default: 1)'
     )
     
     parser.add_argument(
         '--threshold', '-t',
         type=int,
-        default=None,
-        help='Alpha threshold value (0-255). Pixels >= threshold become opaque, < threshold become transparent. Applied before seam removal.'
+        default=200,
+        help='Alpha threshold value (0-255). Pixels >= threshold become opaque, < threshold become transparent. Applied before seam removal (default: 200).'
     )
     
     args = parser.parse_args()
