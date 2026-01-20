@@ -11,6 +11,10 @@ As an input, we provide:
 
 Then the code will change the RGBs of those seam pixels to match the nearby non-seam pixels.
 
+RUN:
+python tightener.py -i sample_nobg.png -w 1 -t 200
+
+
 """
 
 import argparse
@@ -32,8 +36,8 @@ def detect_edge_mask(alpha_channel, seam_width):
     # Find semi-transparent edge pixels (alpha between 0.05 and 0.95)
     edge_mask = ((alpha_np > 0.05) & (alpha_np < 0.95)).astype(np.uint8) * 255
     
-    # Create binary mask for fully opaque pixels
-    _, binary_mask = cv2.threshold((alpha_np * 255).astype(np.uint8), 250, 255, cv2.THRESH_BINARY)
+    # Create binary mask for FULLY opaque pixels only (alpha = 255)
+    _, binary_mask = cv2.threshold((alpha_np * 255).astype(np.uint8), 254, 255, cv2.THRESH_BINARY)
     
     # Get inner safe region - erode by seam_width pixels
     kernel = np.ones((3, 3), np.uint8)
@@ -48,7 +52,8 @@ def detect_edge_mask(alpha_channel, seam_width):
 
 def inpaint_seams(image_rgb, alpha_np, seam_mask, inner_region, seam_width):
     """
-    Replace seam pixels with colors from inner pixels and adjust alpha.
+    Replace seam pixels with weighted average of nearby inner pixels.
+    Weights are based on inverse distance.
     """
     # Convert to numpy arrays
     img_np = np.array(image_rgb).astype(np.float32)
@@ -67,17 +72,42 @@ def inpaint_seams(image_rgb, alpha_np, seam_mask, inner_region, seam_width):
     result = img_np.copy()
     alpha_result = alpha_np.copy()
     
-    # For each seam pixel, find nearest inner pixel
+    # For each seam pixel, find K nearest inner pixels
     from scipy.spatial import cKDTree
     tree = cKDTree(inner_coords)
     
-    # Find nearest inner pixel for each seam pixel
-    distances, indices = tree.query(seam_coords, k=1)
+    # Search within 1 pixel radius only
+    search_radius = 1.5  # Slightly more than 1 to catch diagonal neighbors
     
-    # Copy colors from nearest inner pixels and make alpha more opaque
-    for seam_px, inner_idx in zip(seam_coords, indices):
-        inner_px = inner_coords[inner_idx]
-        result[seam_px[0], seam_px[1]] = img_np[inner_px[0], inner_px[1]]
+    # Weight colors by inverse distance
+    for seam_px in seam_coords:
+        # Find all inner pixels within radius
+        nearby_indices = tree.query_ball_point(seam_px, r=search_radius)
+        
+        if len(nearby_indices) == 0:
+            # If no pixels within 1 pixel, fall back to nearest pixel
+            dist, idx = tree.query(seam_px, k=1)
+            nearby_indices = [idx]
+        
+        # Get coordinates and calculate distances
+        nearby_coords = inner_coords[nearby_indices]
+        dists = np.linalg.norm(nearby_coords - seam_px, axis=1)
+        
+        # Handle case where distance is 0 (shouldn't happen but just in case)
+        dists = np.where(dists < 1e-6, 1e-6, dists)
+        
+        # Inverse distance weighting
+        weights = 1.0 / dists
+        weights = weights / weights.sum()
+        
+        # Weighted average of RGB values
+        weighted_color = np.zeros(3, dtype=np.float32)
+        for w, idx in zip(weights, nearby_indices):
+            inner_px = inner_coords[idx]
+            weighted_color += w * img_np[inner_px[0], inner_px[1]]
+        
+        result[seam_px[0], seam_px[1]] = weighted_color
+        
         # Make edge pixels more opaque to reduce halo
         alpha_result[seam_px[0], seam_px[1]] = max(alpha_result[seam_px[0], seam_px[1]], 0.98)
     
