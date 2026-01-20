@@ -145,7 +145,7 @@ def load_birefnet_with_custom_weights(checkpoint_path: str = None):
     return model
 
 
-def remove_background(image_path: str, model, device='cpu', batch_size=4):
+def remove_background(image_path: str, model, device='cpu', batch_size=4, seam_width=1, threshold=200):
     """Remove background from image using BiRefNet"""
     
     # Image preprocessing
@@ -226,7 +226,7 @@ def remove_background(image_path: str, model, device='cpu', batch_size=4):
         for idx, rgba_frame in enumerate(frames_rgba):
             if (idx + 1) % 10 == 0 or idx == 0 or idx == len(frames_rgba) - 1:
                 print(f"  Tightening frame {idx + 1}/{len(frames_rgba)}...")
-            result_tight = apply_tightening(rgba_frame, seam_width=1, threshold=200)
+            result_tight = apply_tightening(rgba_frame, seam_width=seam_width, threshold=threshold)
             frames_tight.append(result_tight)
         
         tightening_time = time.time() - tightening_start
@@ -270,7 +270,7 @@ def remove_background(image_path: str, model, device='cpu', batch_size=4):
         # Apply tightening to remove seams
         print("Applying tightening...")
         tightening_start = time.time()
-        result_tight = apply_tightening(result_rgba, seam_width=1, threshold=200)
+        result_tight = apply_tightening(result_rgba, seam_width=seam_width, threshold=threshold)
         tightening_time = time.time() - tightening_start
         
         total_time = time.time() - start_time
@@ -335,6 +335,20 @@ Examples:
         help='Batch size for processing animated images (default: 8)'
     )
     
+    parser.add_argument(
+        '--seam-width', '-s',
+        type=int,
+        default=1,
+        help='Seam width in pixels for tightening (default: 1)'
+    )
+    
+    parser.add_argument(
+        '--threshold', '-t',
+        type=int,
+        default=200,
+        help='Alpha threshold for tightening (0-255, default: 200)'
+    )
+    
     args = parser.parse_args()
     
     # Validate inputs
@@ -362,7 +376,9 @@ Examples:
         model.eval()
         
         # Process image
-        result_rgba, result_tight, durations = remove_background(args.input, model, device, args.batch_size)
+        result_rgba, result_tight, durations = remove_background(
+            args.input, model, device, args.batch_size, args.seam_width, args.threshold
+        )
     except RuntimeError as e:
         if "CUDA" in str(e) and device == "cuda":
             print(f"\nWarning: CUDA error encountered: {str(e)[:100]}...")
@@ -370,7 +386,9 @@ Examples:
             device = "cpu"
             model.to(device)
             model.eval()
-            result_rgba, result_tight, durations = remove_background(args.input, model, device, args.batch_size)
+            result_rgba, result_tight, durations = remove_background(
+                args.input, model, device, args.batch_size, args.seam_width, args.threshold
+            )
         else:
             raise
     
