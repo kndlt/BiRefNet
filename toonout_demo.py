@@ -13,6 +13,7 @@ from PIL import Image
 from torchvision import transforms
 import sys
 import os
+from huggingface_hub import hf_hub_download
 
 # Simple fix for BiRefNet compatibility
 import transformers.configuration_utils
@@ -28,7 +29,7 @@ transformers.configuration_utils.PretrainedConfig.__getattribute__ = patched_get
 from transformers import AutoModelForImageSegmentation
 
 
-def load_birefnet_with_custom_weights(checkpoint_path: str):
+def load_birefnet_with_custom_weights(checkpoint_path: str = None):
     """Load BiRefNet model with custom fine-tuned weights"""
     
     print(f"Loading base BiRefNet model from HuggingFace...")
@@ -37,6 +38,14 @@ def load_birefnet_with_custom_weights(checkpoint_path: str):
         "ZhengPeng7/BiRefNet", 
         trust_remote_code=True
     )
+    
+    # Download weights from HuggingFace if no local path provided
+    if checkpoint_path is None:
+        print("Downloading fine-tuned weights from HuggingFace (joelseytre/toonout)...")
+        checkpoint_path = hf_hub_download(
+            repo_id="joelseytre/toonout",
+            filename="birefnet_finetuned_toonout.pth"
+        )
     
     print(f"Loading custom weights from {checkpoint_path}...")
     # Load and apply custom weights
@@ -94,8 +103,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Auto-download weights from HuggingFace
+  python toonout_demo.py --input test.jpg
+  
+  # Use local weights file
   python toonout_demo.py --weights model.pth --input test.jpg
-  python toonout_demo.py --weights model.pth --input test.jpg --output result.png
   python toonout_demo.py -w model.pth -i test.jpg -o result.png
         """
     )
@@ -103,15 +115,15 @@ Examples:
     parser.add_argument(
         '--weights', '-w',
         type=str,
-        required=True,
-        help='Path to the fine-tuned BiRefNet weights (.pth file)'
+        default=None,
+        help='Path to the fine-tuned BiRefNet weights (.pth file). If not provided, will auto-download from HuggingFace (joelseytre/toonout)'
     )
     
     parser.add_argument(
         '--input', '-i',
         type=str,
-        required=True,
-        help='Path to the input image'
+        default='sample.png',
+        help='Path to the input image (default: sample.png)'
     )
     
     parser.add_argument(
@@ -132,7 +144,7 @@ Examples:
     args = parser.parse_args()
     
     # Validate inputs
-    if not os.path.exists(args.weights):
+    if args.weights and not os.path.exists(args.weights):
         print(f"Error: Weights file not found: {args.weights}")
         sys.exit(1)
     
